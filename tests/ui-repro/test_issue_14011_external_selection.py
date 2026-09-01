@@ -62,6 +62,8 @@ pytest.importorskip("wintegrate", reason="pip install wintegrate")
 from wintegrate import Window, interop  # noqa: E402
 from wintegrate.apps import sweep_processes_verified  # noqa: E402
 
+from conftest import maximize  # noqa: E402
+
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32", reason="drives the packaged app through UI Automation"
 )
@@ -139,7 +141,7 @@ def _selection(window: Window) -> dict[str, bool]:
 
 
 @pytest.fixture(scope="module")
-def observed() -> dict[str, dict[str, bool]]:
+def observed(recording) -> dict[str, dict[str, bool]]:
     """Selection state before and after another process creates a file."""
     folder = Path.home() / f"issue14011-{uuid.uuid4().hex[:8]}"
     folder.mkdir(parents=True)
@@ -169,6 +171,12 @@ def observed() -> dict[str, dict[str, bool]]:
         require_all=True,
     )
     try:
+        # Maximised before recording starts, so the file list fills the frame
+        # and the selection highlight is legible; starting the recorder here
+        # rather than at session start keeps the cold launch out of the video.
+        maximize(window.hwnd)
+        time.sleep(1.5)
+        recording.begin()
         with window.foreground(verify=False):
             assert window.focus_content_island(timeout=20.0), (
                 "keyboard focus never reached the XAML island, so nothing typed below "
