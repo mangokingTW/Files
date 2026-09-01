@@ -106,17 +106,44 @@ DETERMINISTIC_STARTUP = {
 }
 
 
-def settled_selection(window: Window, wanted: set[str], timeout: float = 20.0) -> dict[str, bool]:
-    """Reads the selection until every expected row has been seen once."""
+def settled_selection(window: Window, wanted: set[str], timeout: float = 25.0) -> dict[str, bool]:
+    """Reads the selection until one clean pass has seen every expected row."""
     deadline = time.monotonic() + timeout
     state: dict[str, bool] = {}
     while time.monotonic() < deadline:
-        state = _selection(window)
-        if wanted <= set(state):
-            return state
+        reading = _selection(window)
+        if reading is not None:
+            state = reading
+            if wanted <= set(state):
+                return state
         time.sleep(1.0)
     return state
 
+
+def _address_bar(window: Window, timeout: float = 45.0):
+    """The address bar, retried while the window is still settling.
+
+    `find_descendant` retries a *miss* internally but propagates a `COMError`,
+    and that is what a runner produced: the maximise lands after `IsZoomed` has
+    stopped being polled and moves the tree while this lookup walks it.
+
+    "The element went away, ask again" and "the element does not exist" are
+    different answers; only the second is worth failing on.
+    """
+    deadline = time.monotonic() + timeout
+    last: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            return window.re_resolve_element().find_descendant(
+                automation_id=ADDRESS_BAR_ID, timeout=3.0
+            )
+        except Exception as exc:  # noqa: BLE001 - retried; reported if it never settles
+            last = exc
+            time.sleep(1.0)
+    raise AssertionError(
+        f"the address bar ({ADDRESS_BAR_ID}) never resolved within {timeout}s; "
+        f"last error was {type(last).__name__}: {last}"
+    )
 
 def _dismiss_any_content_dialog(window: Window, timeout: float = 8.0) -> None:
     """Closes a startup ContentDialog if one is up, and says which.
@@ -146,30 +173,33 @@ def _dismiss_any_content_dialog(window: Window, timeout: float = 8.0) -> None:
     print("no startup dialog to dismiss")
 
 
-def _selection(window: Window) -> dict[str, bool]:
-    """Which of our files the list reports as selected, right now.
+def _selection(window: Window) -> dict[str, bool] | None:
+    """Which of our files the list reports as selected, or None if it moved.
 
-    Keyed on the leading file name because the item's accessible name carries
-    trailing metadata — `'existing_a.txt, 資料夾'` on this machine — which is
-    localised and not worth matching on.
+    Keyed on the leading file name: the item's accessible name carries trailing
+    metadata that is localised and not worth matching on.
+
+    **The traversal is inside the guard, not just the property reads.** An
+    earlier version guarded only the reads and a runner blew up inside
+    `find_all` instead, with `COMError: An event was unable to invoke any of the
+    subscribers`.
+
+    Returns None rather than a partial dict, because a partial answer would make
+    "this row is not in the map" and "this row is not selected" the same thing.
     """
-    state: dict[str, bool] = {}
-    for element in window.re_resolve_element().find_all(control_type_id=CONTROL_TYPE_LIST_ITEM):
-        # Both reads are guarded, not just the second one. The list re-renders
-        # while this walks it, and a stale element raises on *any* property —
-        # `.name` included, which is where it actually blew up on a runner
-        # (COMError: an event was unable to invoke any of the subscribers).
-        try:
+    try:
+        elements = window.re_resolve_element().find_all(control_type_id=CONTROL_TYPE_LIST_ITEM)
+        state: dict[str, bool] = {}
+        for element in elements:
             name = element.name or ""
             if not name:
                 continue
             for wanted in (EXISTING_A, EXISTING_B, EXTERNAL):
                 if name.startswith(wanted):
                     state[wanted] = bool(element.is_selected)
-        except Exception:  # noqa: BLE001 - a stale item is not a selection
-            continue
-    return state
-
+        return state
+    except Exception:  # noqa: BLE001 - the tree moved under the walk; ask again
+        return None
 
 @pytest.fixture(scope="module")
 def observed(recording) -> dict[str, dict[str, bool]]:
@@ -228,9 +258,7 @@ def observed(recording) -> dict[str, dict[str, bool]]:
             # reads as "PART_TextBox does not exist" when it means "ask again in
             # a moment" — and it cost two runs and a wrong conclusion about
             # content islands before it was waited on properly.
-            address = window.re_resolve_element().find_descendant(
-                automation_id=ADDRESS_BAR_ID, timeout=45.0
-            )
+            address = _address_bar(window)
 
             # Only now is there something worth filming.
             recording.begin()
@@ -268,7 +296,7 @@ def observed(recording) -> dict[str, dict[str, bool]]:
                 "the assertions below would be measuring an empty selection"
             )
             time.sleep(1.5)
-            after_click = _selection(window)
+            after_click = settled_selection(window, {EXISTING_A})
 
             # This process is the "other process". Nothing about the reporter's
             # Minecraft server is needed — only that the writer is not Files.
@@ -278,7 +306,10 @@ def observed(recording) -> dict[str, dict[str, bool]]:
             after_external = after_click
             while time.monotonic() < deadline:
                 time.sleep(1.0)
-                after_external = _selection(window)
+                reading = _selection(window)
+                if reading is None:
+                    continue
+                after_external = reading
                 if EXTERNAL in after_external:
                     break
 
