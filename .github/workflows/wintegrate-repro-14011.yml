@@ -30,32 +30,68 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Two things on the arm64 image take the foreground away from whatever is
-      # being driven, and both of them do it *after* the run has started:
+      # Things on the arm64 image take the foreground away from whatever is being
+      # driven, and they do it *after* the run has started: the provisioning
+      # daemon spawns a terminal popup every 30 seconds until WSL is there, and
+      # Edge's first-run page appears the first time anything launches a URL. A
+      # test that loses the foreground does not fail with "the foreground was
+      # taken" — it fails with an empty field, a keystroke that went nowhere, or a
+      # palette that never came up.
       #
-      #   * the provisioning daemon spawns a terminal popup every 30 seconds
-      #     until WSL is updated
-      #   * the OOBE privacy experience can appear on first interactive use
-      #
-      # A test that loses the foreground does not fail with "the foreground was
-      # taken" — it fails with an empty document, an unselected item, or a
-      # keystroke that went nowhere.
+      # This mirrors wintegrate's own `test-arm64` job, which is where the working
+      # version of it lives. The part that matters and is easy to leave out is the
+      # MSI fallback: `wsl --update` alone answers "The Windows Subsystem for
+      # Linux is not installed" and exits 0 on this image, so the popup it was
+      # meant to stop keeps coming. There is nothing to update until WSL exists.
       - name: Stop the arm64 image stealing the foreground
         if: matrix.arch == 'arm64'
         shell: pwsh
         run: |
-          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Force `
-            -ErrorAction SilentlyContinue | Out-Null
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' `
-            -Name 'DisablePrivacyExperience' -Value 1 -Type DWord -Force `
-            -ErrorAction SilentlyContinue
-
           $p = Start-Process -FilePath wsl.exe -ArgumentList '--update', '--confirm' `
             -NoNewWindow -PassThru
           if (-not $p.WaitForExit(60000)) { $p.Kill(); Write-Host 'wsl --update timed out' }
 
+          # `wsl --status` writes UTF-16, which comes back with interleaved NULs
+          # through a pipe and matches nothing.
+          function Get-WslStatus {
+            $prev = [Console]::OutputEncoding
+            try {
+              [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+              return ((& wsl.exe --status 2>&1 | Out-String) -replace "\0", '')
+            } finally { [Console]::OutputEncoding = $prev }
+          }
+          $status = Get-WslStatus
+          Write-Host "WSL status: $status"
+          if ($status -match 'not installed') {
+            try {
+              $rel = Invoke-RestMethod 'https://api.github.com/repos/microsoft/WSL/releases/latest'
+              $asset = $rel.assets | Where-Object { $_.name -match 'arm64\.msi$' } | Select-Object -First 1
+              if ($asset) {
+                Write-Host "Downloading $($asset.name)..."
+                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile wsl-arm64.msi
+                Start-Process msiexec -ArgumentList '/i', 'wsl-arm64.msi', '/qn', '/norestart' -Wait
+                Write-Host "WSL status after install: $(Get-WslStatus)"
+              }
+            } catch {
+              Write-Host "WSL MSI fallback skipped: $_"
+            }
+          }
+
+          # Edge's first-run page, in both hives.
+          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Force -ErrorAction SilentlyContinue | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name 'HideFirstRunExperience' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name 'PreventFirstRunPage' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          New-Item -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Edge' -Force -ErrorAction SilentlyContinue | Out-Null
+          Set-ItemProperty -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Edge' -Name 'HideFirstRunExperience' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+
+          # The OOBE privacy experience, which is a different dialog from Edge's.
+          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Force -ErrorAction SilentlyContinue | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Name 'DisablePrivacyExperience' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+
           Get-Process -Name 'wsl','wslhost','WindowsTerminal','msedge','msedgewebview2' `
             -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          # wsl.exe exits non-zero when WSL is absent, and this step is best-effort.
+          $global:LASTEXITCODE = 0
 
       - uses: actions/setup-python@v5
         with:
