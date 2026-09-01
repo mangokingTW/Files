@@ -58,7 +58,7 @@ import pytest
 
 pytest.importorskip("wintegrate", reason="pip install wintegrate")
 
-from wintegrate import Window, interop  # noqa: E402
+from wintegrate import ImeConversion, Window, interop  # noqa: E402
 from wintegrate.apps import (  # noqa: E402
     find_packaged_app,
     launch_packaged_app,
@@ -104,6 +104,28 @@ DETERMINISTIC_STARTUP = {
     # A hosted runner's session is elevated, so Files shows this every launch.
     "ShowRunningAsAdminPrompt": False,
 }
+
+
+def _type_text(window: Window, text: str) -> None:
+    """Types literal text as physical key presses rather than as Unicode.
+
+    Both put the same characters in the box. The difference is what anything
+    watching the keyboard sees: a physical key carries a real virtual key, while
+    Unicode injection arrives as `vkCode = VK_PACKET` with the character in
+    `scanCode`. A visualiser drawing the recording labels the former correctly and
+    mislabels the latter — `a` (97) shows up as Numpad1, `q` (113) as F2 — so a
+    recording of Unicode typing either says nothing or says something wrong.
+
+    `ime_mode` establishes English first, because a scan code means whatever the
+    active input state says it means: under Bopomofo, unshifted letters are
+    phonetic keys and correct injection leaves the box empty. It also normalises
+    Caps Lock, which is desktop-global and would otherwise upper-case the path.
+
+    Named keys and chords stay on `send_keys`: `^a` and `{ENTER}` already carry
+    real virtual keys.
+    """
+    with window.ime_mode(ImeConversion.ALPHANUMERIC):
+        interop.send_physical_keys(text)
 
 
 def settled_selection(window: Window, wanted: set[str], timeout: float = 25.0) -> dict[str, bool]:
@@ -265,7 +287,7 @@ def observed(recording) -> dict[str, dict[str, bool]]:
             address.set_focus()
             time.sleep(0.5)
             interop.send_keys("^a")
-            interop.send_keys(str(folder))
+            _type_text(window, str(folder))
             time.sleep(0.8)
             interop.send_keys("{ENTER}")
             time.sleep(5.0)
