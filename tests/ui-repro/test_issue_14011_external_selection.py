@@ -64,6 +64,7 @@ from wintegrate.apps import sweep_processes_verified  # noqa: E402
 
 from conftest import maximize  # noqa: E402
 
+
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32", reason="drives the packaged app through UI Automation"
 )
@@ -73,6 +74,13 @@ PROCESS = "Files.exe"
 WINDOW_CLASS = "WinUIDesktopWin32WindowClass"
 ADDRESS_BAR_ID = "PART_TextBox"
 CONTROL_TYPE_LIST_ITEM = 50007
+CONTROL_TYPE_BUTTON = 50000
+# WinUI's ContentDialog names its buttons this way, and only these two.
+# `CloseButton` was in this list once: it is also the id of the *tab* close
+# button on Files' own title bar, so the dismissal closed the tab, the address
+# bar went with it, and the failure read as "PART_TextBox does not exist" three
+# runs in a row. An id that is not scoped to a dialog is not a dialog id.
+DIALOG_DISMISS_IDS = ("SecondaryButton", "PrimaryButton")
 
 EXISTING_A = "existing_a.txt"
 EXISTING_B = "existing_b.txt"
@@ -82,10 +90,17 @@ EXTERNAL = "external_new.txt"
 SETTLE_AFTER_LAUNCH = float(os.environ.get("FILES_SETTLE", "8"))
 WATCHER_TIMEOUT = float(os.environ.get("FILES_WATCHER_TIMEOUT", "10"))
 
+# Constants.LocalSettings.SettingsFolderName / UserSettingsFileName. An earlier
+# version of this wrote LocalState/settings.json, which Files never reads — so
+# none of these applied and the "Files is running as administrator" dialog sat
+# over the file list for the whole recording.
+SETTINGS_RELATIVE_PATH = ("settings", "user_settings.json")
+
 DETERMINISTIC_STARTUP = {
     "ContinueLastSessionOnStartUp": False,
     "RestoreTabsOnStartup": False,
     "OpenSpecificPageOnStartup": False,
+    # A hosted runner's session is elevated, so Files shows this every launch.
     "ShowRunningAsAdminPrompt": False,
 }
 
@@ -121,6 +136,34 @@ def _launch_packaged_app(aumid: str) -> list[str]:
     return ["explorer.exe", f"shell:appsFolder\\{aumid}"]
 
 
+def _dismiss_any_content_dialog(window: Window, timeout: float = 8.0) -> None:
+    """Closes a startup ContentDialog if one is up, and says which.
+
+    `invoke()`, not `click()`: a physical click aims at the middle of the
+    element's bounding rectangle and silently does nothing when there isn't one.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            root = window.re_resolve_element()
+            buttons = root.find_all(control_type_id=CONTROL_TYPE_BUTTON)
+        except Exception:  # noqa: BLE001 - the tree is still settling
+            time.sleep(0.5)
+            continue
+        for button in buttons:
+            if (button.automation_id or "") not in DIALOG_DISMISS_IDS:
+                continue
+            print(f"dismissing a startup dialog via {button.automation_id!r} ({button.name!r})")
+            try:
+                button.invoke()
+            except Exception as exc:  # noqa: BLE001
+                print(f"  invoke failed: {type(exc).__name__}: {exc}")
+            time.sleep(1.5)
+            return
+        time.sleep(0.5)
+    print("no startup dialog to dismiss")
+
+
 def _selection(window: Window) -> dict[str, bool]:
     """Which of our files the list reports as selected, right now.
 
@@ -149,12 +192,8 @@ def observed(recording) -> dict[str, dict[str, bool]]:
     (folder / EXISTING_B).write_text("b", encoding="utf-8")
 
     aumid = _find_packaged_app(PACKAGE)
-    settings = (
-        Path(os.environ["LOCALAPPDATA"])
-        / "Packages"
-        / aumid.split("!")[0]
-        / "LocalState"
-        / "settings.json"
+    settings = Path(os.environ["LOCALAPPDATA"]).joinpath(
+        "Packages", aumid.split("!")[0], "LocalState", *SETTINGS_RELATIVE_PATH
     )
     original = settings.read_text(encoding="utf-8") if settings.exists() else None
     config = json.loads(original) if original else {}
@@ -172,11 +211,7 @@ def observed(recording) -> dict[str, dict[str, bool]]:
     )
     try:
         # Maximised before recording starts, so the file list fills the frame
-        # and the selection highlight is legible; starting the recorder here
-        # rather than at session start keeps the cold launch out of the video.
-        maximize(window.hwnd)
-        time.sleep(1.5)
-        recording.begin()
+        # and the selection highlight is legible.
         with window.foreground(verify=False):
             assert window.focus_content_island(timeout=20.0), (
                 "keyboard focus never reached the XAML island, so nothing typed below "
@@ -184,9 +219,27 @@ def observed(recording) -> dict[str, dict[str, bool]]:
             )
             time.sleep(SETTLE_AFTER_LAUNCH)
 
+            # Belt and braces on the admin dialog. The setting written above
+            # should stop it appearing, but a dialog covering the file list
+            # makes the recording worthless, so one is dismissed if present.
+            _dismiss_any_content_dialog(window)
+
+            maximize(window.hwnd)
+
+            # Wait for the address bar to resolve *after* the resize, rather
+            # than sleeping a fixed amount and hoping. A WinUI 3 content island
+            # does re-lay-out to follow its window, but not instantly; a fixed
+            # pause ends mid-layout on a slow machine, with the frame already
+            # full-screen and part of the visual tree not yet realised. That
+            # reads as "PART_TextBox does not exist" when it means "ask again in
+            # a moment" — and it cost two runs and a wrong conclusion about
+            # content islands before it was waited on properly.
             address = window.re_resolve_element().find_descendant(
-                automation_id=ADDRESS_BAR_ID, timeout=20.0
+                automation_id=ADDRESS_BAR_ID, timeout=45.0
             )
+
+            # Only now is there something worth filming.
+            recording.begin()
             address.set_focus()
             time.sleep(0.5)
             interop.send_keys("^a")

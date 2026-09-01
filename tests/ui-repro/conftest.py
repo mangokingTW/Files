@@ -28,7 +28,9 @@ import pytest
 
 RECORDING_FPS = 10
 OUTPUT_DIR = Path("recording-artifacts")
-SW_MAXIMIZE = 3
+
+WM_SYSCOMMAND = 0x0112
+SC_MAXIMIZE = 0xF030
 
 
 def maximize(hwnd: int) -> None:
@@ -37,10 +39,19 @@ def maximize(hwnd: int) -> None:
     A default-sized window on a 1024x768 runner leaves the interesting columns
     off screen or too small to read, which is most of what makes a recording
     useless to the person it was made for.
+
+    Sends the window the message its own Maximize button sends, rather than
+    calling `ShowWindow(SW_MAXIMIZE)`. The two are not equivalent for a WinUI 3
+    app: `ShowWindow` changes the top-level window's state from outside, and the
+    content island does not necessarily follow — measured, the frame filled the
+    screen while the XAML kept drawing in a corner, and part of the visual tree
+    was never realised. `WM_SYSCOMMAND`/`SC_MAXIMIZE` goes through the window's
+    own message handling, which is the path the title-bar button uses and the
+    one the framework is listening on.
     """
     user32 = ctypes.WinDLL("user32", use_last_error=True)
-    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-    user32.ShowWindow(hwnd, SW_MAXIMIZE)
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.PostMessageW(hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0)
 
 
 class _Recording:
