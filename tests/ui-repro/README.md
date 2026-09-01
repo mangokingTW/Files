@@ -15,7 +15,7 @@ existing MSTest/Appium harness is a small job. They live outside
 ## Running
 
 ```bash
-pip install wintegrate pytest
+pip install "wintegrate>=0.5.1" pytest
 pytest tests/ui-repro -v -rxX -s
 ```
 

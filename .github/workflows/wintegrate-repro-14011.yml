@@ -62,7 +62,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install wintegrate
-        run: pip install "wintegrate[video]" pytest
+        run: pip install "wintegrate[video]>=0.5.1" pytest
 
       - name: Close anything holding the foreground
         shell: pwsh

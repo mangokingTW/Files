@@ -49,7 +49,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 import time
 import uuid
@@ -60,9 +59,11 @@ import pytest
 pytest.importorskip("wintegrate", reason="pip install wintegrate")
 
 from wintegrate import Window, interop  # noqa: E402
-from wintegrate.apps import sweep_processes_verified  # noqa: E402
-
-from conftest import maximize  # noqa: E402
+from wintegrate.apps import (  # noqa: E402
+    find_packaged_app,
+    launch_packaged_app,
+    sweep_processes_verified,
+)
 
 
 pytestmark = pytest.mark.skipif(
@@ -103,37 +104,6 @@ DETERMINISTIC_STARTUP = {
     # A hosted runner's session is elevated, so Files shows this every launch.
     "ShowRunningAsAdminPrompt": False,
 }
-
-
-def _find_packaged_app(package_name: str) -> str:
-    """The AUMID of an installed MSIX package.
-
-    A packaged app has no path to test for — the package has to be asked about,
-    and it is addressed as `PackageFamilyName!ApplicationId`.
-    """
-    script = (
-        f"$p = Get-AppxPackage -Name '{package_name}' | Select-Object -First 1; "
-        "if (-not $p) { exit 1 }; "
-        "$m = Get-AppxPackageManifest $p; "
-        "$a = $m.Package.Applications.Application | Select-Object -First 1; "
-        "Write-Output ($p.PackageFamilyName + '!' + $a.Id)"
-    )
-    result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    aumid = result.stdout.strip().splitlines()[-1].strip() if result.stdout.strip() else ""
-    if result.returncode != 0 or "!" not in aumid:
-        pytest.skip(f"{package_name} is not installed (Get-AppxPackage found nothing)")
-    return aumid
-
-
-def _launch_packaged_app(aumid: str) -> list[str]:
-    """A packaged app cannot be started by path; hand the shell moniker to explorer."""
-    return ["explorer.exe", f"shell:appsFolder\\{aumid}"]
 
 
 def settled_selection(window: Window, wanted: set[str], timeout: float = 20.0) -> dict[str, bool]:
@@ -209,7 +179,9 @@ def observed(recording) -> dict[str, dict[str, bool]]:
     (folder / EXISTING_A).write_text("a", encoding="utf-8")
     (folder / EXISTING_B).write_text("b", encoding="utf-8")
 
-    aumid = _find_packaged_app(PACKAGE)
+    aumid = find_packaged_app(PACKAGE)
+    if aumid is None:
+        pytest.skip(f"{PACKAGE} is not installed")
     settings = Path(os.environ["LOCALAPPDATA"]).joinpath(
         "Packages", aumid.split("!")[0], "LocalState", *SETTINGS_RELATIVE_PATH
     )
@@ -221,7 +193,7 @@ def observed(recording) -> dict[str, dict[str, bool]]:
 
     sweep_processes_verified((PROCESS,), ("Files",))
     process, window = Window.launch_and_discover(
-        _launch_packaged_app(aumid),
+        launch_packaged_app(aumid),
         timeout=180.0,
         process_names=(PROCESS,),
         window_classes=(WINDOW_CLASS,),
@@ -242,7 +214,11 @@ def observed(recording) -> dict[str, dict[str, bool]]:
             # makes the recording worthless, so one is dismissed if present.
             _dismiss_any_content_dialog(window)
 
-            maximize(window.hwnd)
+            # Window.maximize() verifies with IsZoomed and reports back: a
+            # window can decline, and one whose default rectangle already
+            # exceeds the screen looks maximised without being maximised.
+            if not window.maximize():
+                print("the window declined to maximise; the recording will be small")
 
             # Wait for the address bar to resolve *after* the resize, rather
             # than sleeping a fixed amount and hoping. A WinUI 3 content island
