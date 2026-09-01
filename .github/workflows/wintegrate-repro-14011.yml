@@ -49,7 +49,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install wintegrate
-        run: pip install wintegrate pytest
+        run: pip install "wintegrate[video]" pytest
 
       - name: Close anything holding the foreground
         shell: pwsh
@@ -131,5 +131,20 @@ jobs:
           if ($installed -ne '4.2.9.0') { throw "installed $installed, wanted 4.2.9.0" }
           Write-Host "installed: $installed"
 
+      # The recording is not the evidence — the assertions are — but it answers
+      # the question a table of booleans cannot: does this look like the bug I
+      # was told about? Kept whatever the outcome, because a red run is the one
+      # worth watching.
       - name: Reproduce
+        env:
+          WINTEGRATE_RECORD: "1"
         run: pytest tests/ui-repro -v -rxX -s
+
+      - name: Upload the recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproduction-14011-${{ matrix.arch }}
+          path: recording-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
