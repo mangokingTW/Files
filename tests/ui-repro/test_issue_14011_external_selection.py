@@ -136,6 +136,18 @@ def _launch_packaged_app(aumid: str) -> list[str]:
     return ["explorer.exe", f"shell:appsFolder\\{aumid}"]
 
 
+def settled_selection(window: Window, wanted: set[str], timeout: float = 20.0) -> dict[str, bool]:
+    """Reads the selection until every expected row has been seen once."""
+    deadline = time.monotonic() + timeout
+    state: dict[str, bool] = {}
+    while time.monotonic() < deadline:
+        state = _selection(window)
+        if wanted <= set(state):
+            return state
+        time.sleep(1.0)
+    return state
+
+
 def _dismiss_any_content_dialog(window: Window, timeout: float = 8.0) -> None:
     """Closes a startup ContentDialog if one is up, and says which.
 
@@ -173,13 +185,19 @@ def _selection(window: Window) -> dict[str, bool]:
     """
     state: dict[str, bool] = {}
     for element in window.re_resolve_element().find_all(control_type_id=CONTROL_TYPE_LIST_ITEM):
-        name = element.name or ""
-        for wanted in (EXISTING_A, EXISTING_B, EXTERNAL):
-            if name.startswith(wanted):
-                try:
+        # Both reads are guarded, not just the second one. The list re-renders
+        # while this walks it, and a stale element raises on *any* property —
+        # `.name` included, which is where it actually blew up on a runner
+        # (COMError: an event was unable to invoke any of the subscribers).
+        try:
+            name = element.name or ""
+            if not name:
+                continue
+            for wanted in (EXISTING_A, EXISTING_B, EXTERNAL):
+                if name.startswith(wanted):
                     state[wanted] = bool(element.is_selected)
-                except Exception:  # noqa: BLE001 - a stale item is not a selection
-                    pass
+        except Exception:  # noqa: BLE001 - a stale item is not a selection
+            continue
     return state
 
 
@@ -248,7 +266,9 @@ def observed(recording) -> dict[str, dict[str, bool]]:
             interop.send_keys("{ENTER}")
             time.sleep(5.0)
 
-            after_navigation = _selection(window)
+            # Retried rather than read once: the listing is still settling and
+            # a single pass can catch every item mid-refresh.
+            after_navigation = settled_selection(window, {EXISTING_A, EXISTING_B})
             assert set(after_navigation) >= {EXISTING_A, EXISTING_B}, (
                 f"the folder listing never showed the starting files; saw "
                 f"{after_navigation!r}"
