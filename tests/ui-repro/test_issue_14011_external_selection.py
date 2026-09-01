@@ -193,12 +193,23 @@ def observed() -> dict[str, dict[str, bool]]:
                 f"{after_navigation!r}"
             )
 
+            # `select_verified()` rather than `click()`. A physical click aims
+            # at the middle of the element's bounding rectangle and silently
+            # does nothing when there isn't one — which is what happened on the
+            # hosted runners, where the smaller desktop leaves list items
+            # unlaid-out: the control below caught it as "clicking did not
+            # select", which is exactly what it is for.
+            selected = False
             for element in window.re_resolve_element().find_all(
                 control_type_id=CONTROL_TYPE_LIST_ITEM
             ):
                 if (element.name or "").startswith(EXISTING_A):
-                    element.click()
+                    selected = element.select_verified(timeout=5.0)
                     break
+            assert selected, (
+                f"could not select {EXISTING_A} through the SelectionItem pattern; "
+                "the assertions below would be measuring an empty selection"
+            )
             time.sleep(1.5)
             after_click = _selection(window)
 
