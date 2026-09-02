@@ -1,0 +1,120 @@
+# Runs the automated reproduction of issue #14011 against a released package.
+#
+# The run is **green when the issue still reproduces**:
+# the two reproduction tests are `xfail(strict=True)`, so an XPASS — Files
+# leaving the selection alone — turns the run red instead. A failing control
+# also turns it red, which means the measurement is not trustworthy rather than
+# that the issue is fixed.
+name: Reproduce issue 14011
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wintegrate-repro-issue-14011]
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+          - arch: arm64
+            os: windows-11-arm
+    name: "#14011 on ${{ matrix.arch }}"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # One definition of the runner preparation, shared with the other
+      # reproductions: it quiets what steals the foreground on the arm64 image,
+      # installs wintegrate, and starts an on-screen visualiser so the recording
+      # shows which keys and clicks were sent rather than leaving the viewer to
+      # take the inputs on trust.
+      #
+      # It replaces four steps that used to be copy-pasted into this file, and the
+      # copy was broken: `wsl --update` answers "The Windows Subsystem for Linux
+      # is not installed" and exits 0 on that image, so this looked like it was
+      # quieting the 30-second provisioning popup while doing nothing at all.
+      - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
+        with:
+          wintegrate-version: ">=0.5.5"
+
+      - name: Install Files 4.2.9.0
+        timeout-minutes: 20
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The published bundle, unmodified. Its hash was produced twice, from
+          # independent downloads on different machines.
+          FILES_SHA256: 87BD06F897094FCE4D14EC0D87F258C711477C6F1C5271B055C794B3AAC7FF41
+          FILES_SIGNER: "CN=Yair Aichenbaum, O=Yair Aichenbaum, L=Baltimore, S=Maryland, C=US"
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Files 4.x is framework-dependent. The runner images already carry
+          # Microsoft.WindowsDesktop.App, so this only installs when they do not
+          # — without a runtime, Files starts and shows a #32770 message box
+          # instead of a window, and window discovery accepts that dialog as the
+          # application.
+          $have = & "$env:ProgramFiles\dotnet\dotnet.exe" --list-runtimes |
+            Select-String -Pattern 'Microsoft\.WindowsDesktop\.App 10\.'
+          if (-not $have) {
+            Write-Host "no Microsoft.WindowsDesktop.App 10.x on this image; installing"
+            choco install dotnet-desktopruntime -y --no-progress
+            $global:LASTEXITCODE = 0
+          } else {
+            Write-Host "Windows Desktop runtime already present"
+          }
+
+          # Not fetched from cdn.files.community: that host answers a runner's
+          # datacentre IP with a Cloudflare "Just a moment..." challenge page
+          # rather than the bundle. Every GitHub release of this project carries
+          # zero assets, so a mirror is the only route from CI. The bytes are
+          # verified rather than trusted — hash and publisher signature below.
+          $dir = Join-Path $env:RUNNER_TEMP 'files-pkg'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $asset = 'Files.Package_4.2.9.0_x64_arm64.msixbundle'
+          gh release download files-4.2.9.0 `
+            --repo mangokingTW/wintegrate-test-fixtures `
+            --pattern $asset --dir $dir
+          if ($LASTEXITCODE -ne 0) { throw "gh release download failed ($LASTEXITCODE)" }
+
+          $pkg = Join-Path $dir $asset
+          $hash = (Get-FileHash $pkg -Algorithm SHA256).Hash
+          if ($hash -ne $env:FILES_SHA256) {
+            throw "SHA-256 mismatch: got $hash, expected $env:FILES_SHA256"
+          }
+          $sig = Get-AuthenticodeSignature $pkg
+          if ($sig.Status -ne 'Valid') { throw "signature is $($sig.Status), not Valid" }
+          if ($sig.SignerCertificate.Subject -ne $env:FILES_SIGNER) {
+            throw "unexpected signer: $($sig.SignerCertificate.Subject)"
+          }
+          Write-Host "sha256 and publisher signature ok"
+
+          Add-AppxPackage -Path $pkg -ForceApplicationShutdown -ErrorAction Stop
+          $installed = (Get-AppxPackage -Name 'Files').Version
+          if ($installed -ne '4.2.9.0') { throw "installed $installed, wanted 4.2.9.0" }
+          Write-Host "installed: $installed"
+
+      # The recording is not the evidence — the assertions are — but it answers
+      # the question a table of booleans cannot: does this look like the bug I
+      # was told about? Kept whatever the outcome, because a red run is the one
+      # worth watching.
+      - name: Reproduce
+        env:
+          WINTEGRATE_RECORD: "1"
+        run: pytest tests/ui-repro -v -rxX -s
+
+      - name: Upload the recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproduction-14011-${{ matrix.arch }}
+          path: recording-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
