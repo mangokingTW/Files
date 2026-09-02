@@ -42,8 +42,7 @@ jobs:
       # quieting the 30-second provisioning popup while doing nothing at all.
       - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
         with:
-          wintegrate-version: ">=0.5.4"
-          input-hud: "true"
+          wintegrate-version: ">=0.5.5"
 
       - name: Install Files 4.2.9.0
         timeout-minutes: 20
